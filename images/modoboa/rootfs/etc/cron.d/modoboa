@@ -1,0 +1,24 @@
+#
+# Modoboa specific cron jobs
+#
+
+# Operations on mailboxes
+*       *       *       *       *       sudo -EHu mail PYTHONPATH="${PYTHONPATH}" python3 /data/instance/manage.py handle_mailbox_operations
+
+# Sessions table cleanup
+0       0       *       *       *       python3 /data/instance/manage.py clearsessions
+
+# Logs table cleanup
+0       0       *       *       *       python3 /data/instance/manage.py cleanlogs
+
+# Logs parsing
+*/5     *       *       *       *       /contrib/run_logparser.sh
+
+# DNSBL checks
+*/30    *       *       *       *       python3 /data/instance/manage.py modo check_mx
+
+# Public API communication
+0       *       *       *       *       python3 /data/instance/manage.py communicate_with_public_api
+
+# Generate DKIM keys (they will belong to the user running this job)
+*       *       *       *       *       python3 /data/instance/manage.py modo manage_dkim_keys

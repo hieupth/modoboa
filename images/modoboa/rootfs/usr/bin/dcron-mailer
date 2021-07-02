@@ -1,0 +1,30 @@
+#!/bin/sh
+#
+# DCron "mailer script" that writes all input to the stderr of PID 1
+#
+
+exec >/proc/1/fd/2 2>&1
+
+state=read_headers
+while read line;
+do
+	if [ "${state}" = "read_headers" ];
+	then
+		case "${line}" in
+			# Drop header name from subject line
+			"Subject: "*)
+				echo "[CRON FAILURE] ${line:9}"
+				continue
+			;;
+			
+			# Ignore other headers and blank lines while processing headers
+			*": "*|"")
+				continue
+			;;
+		esac
+	fi
+	
+	state=read_content
+	
+	echo "[CRON FAILURE]   | ${line}"
+done

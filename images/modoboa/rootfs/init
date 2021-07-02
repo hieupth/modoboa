@@ -1,0 +1,145 @@
+#!/bin/sh
+set -e
+
+OPTION="${1}"
+shift 1
+
+# Basic environment variables
+export HOME="/data"
+export PYTHONPATH="${HOME}/instance:${HOME}/packages"
+
+### Apply container configuration
+# Create system user and group for modoboa service
+addgroup -Sg "${MODOBOA_GID}" modoboa ||:
+adduser -SDu "${MODOBOA_UID}" -h "${HOME}" -G modoboa modoboa ||:
+
+# Make sure data directory is owned by the modoboa service user
+if [ -d "${HOME}/instance" ];
+then
+	chown -R modoboa:modoboa "${HOME}/instance"
+fi
+
+# Create gunicorn socket directory
+mkdir -p /run/gunicorn
+chown modoboa:modoboa /run/gunicorn
+
+# Create nginx socket directory
+mkdir -p /run/nginx
+chown nginx /run/nginx
+
+
+### Deploy instance
+# Deploy quick-start
+if [ "${OPTION}" = "deploy" ];
+then
+	cd "${HOME}"
+	exec sudo -Hu modoboa modoboa-admin.py deploy instance "$@"
+fi
+
+# Make sure Modoboa has been deployed before attempting to use it
+if ! [ -d "${HOME}/instance" ];
+then
+	echo 'Modoboa has not been deployed yet!' >&2
+	echo 'Please run `deploy` first.' >&2
+	exit 1
+fi
+
+cd "${HOME}/instance"
+
+
+### PIP extension install support
+# Create (pip-compatible) local Python packages directory with convinient symlink
+python3 <<'EOF'
+import os, sys
+
+PACKAGES_SYM_ABS = "{0}/packages".format(os.environ["HOME"])
+PACKAGES_DIR_REL = "packages-prefix/lib/python{0}/site-packages".format('.'.join(map(str, sys.version_info[0:2])))
+PACKAGES_DIR_ABS = "{0}/{1}".format(os.environ["HOME"], PACKAGES_DIR_REL)
+
+try:
+	os.unlink(PACKAGES_SYM_ABS)
+except FileNotFoundError:
+	pass
+
+os.makedirs(PACKAGES_DIR_ABS, exist_ok=True)
+os.symlink(PACKAGES_DIR_REL, PACKAGES_SYM_ABS)
+EOF
+
+
+## `modoboa-stats` environment setup
+# Create log file if it doesn't exist
+touch /var/log/mail.log
+
+# Create and link RRD file persistence directory
+mkdir -p "${HOME}/stats"
+ln -sf "${HOME}/stats" "/tmp/modoboa"
+
+
+
+case "${OPTION}" in
+	"start")
+		# Regenerate Postfix map files
+		python3 -B manage.py generate_postfix_maps --destdir /shared/modoboa/postfix
+		
+		# Regenerate Dovecot database configuration files
+		python3 -B /contrib/generate_dovecot.py /shared/modoboa/dovecot
+		
+		# Regenerate OpenDKIM database configuration files
+		python3 -B /contrib/generate_opendkim.py /shared/modoboa/opendkim
+		
+		# Delegate process management (and "cron") to supervisor
+		exec supervisord -c /lib/supervisor/supervisord.conf
+	;;
+	
+	"admin")
+		exec sudo -EHu modoboa PYTHONPATH="${PYTHONPATH}" modoboa-admin.py "$@"
+	;;
+	
+	"install")
+		export PYTHONUSERBASE="${HOME}/packages-prefix"
+		exec pip3 --no-cache-dir install --user "$@"
+	;;
+	
+	"update")
+		export PYTHONUSERBASE="${HOME}/packages-prefix"
+		if [ $# -lt 1 ];
+		then
+			# Collect list of locally installed packages and offer to upgrade those
+			PKGS="$(pip3 --no-cache-dir freeze --user | grep -v '^\-e' | cut -d'=' -f1)"
+			echo "Currently installed packages are:"
+			for pkg in ${PKGS};
+			do
+				echo " * ${pkg}"
+			done
+			
+			while true;
+			do
+				read -p "Do you wish to try and upgrade each of these? [y/n] " resp
+				if [ "${resp}" = "y" ] || [ "${resp}" = "Y" ];
+				then
+					break;
+				elif [ "${resp}" = "n" ] || [ "${resp}" = "N" ] || [ -z "${resp}" ];
+				then
+					exit 0
+				fi
+			done
+			
+			set -- ${PKGS}
+		fi
+		exec pip3 --no-cache-dir install --user --upgrade --upgrade-strategy only-if-needed "$@"
+	;;
+	
+	"manage")
+		exec sudo -EHu modoboa PYTHONPATH="${PYTHONPATH}" python3 manage.py "$@"
+	;;
+	
+	"shell"|"bash"|"sh")
+		export PYTHONUSERBASE="${HOME}/packages-prefix"
+		exec /bin/sh "$@"
+	;;
+	
+	*)
+		echo "modoboa: Unknown command '${OPTION}'" >&2
+		exit 127
+	;;
+esac
